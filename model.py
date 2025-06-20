@@ -43,7 +43,7 @@ class PureMF(BasicModel):
         self.args = args
         self.num_users  = dataset.n_users
         self.num_items  = dataset.m_items
-        self.latent_dim = self.args.recdim #config['latent_dim_rec']
+        self.latent_dim = self.args.recdim
         self.f = nn.Sigmoid()
         self.__init_weight()
         
@@ -92,11 +92,13 @@ class SGCN(nn.Module):
         self.num_items  = dataset.m_items
         train_ui_mat = dataset.UserItemNet
         userind_arr, itemind_arr = train_ui_mat.nonzero()
-        itemind_arr_added = [itemind+self.num_users for itemind in itemind_arr]
-        edge_index = torch.tensor([np.concatenate((userind_arr, itemind_arr_added)),
-                                np.concatenate((itemind_arr_added, userind_arr))], dtype=torch.long)
+        itemind_arr_added = itemind_arr + self.num_users
+        edge_index = torch.tensor([
+            np.concatenate((userind_arr, itemind_arr_added)),
+            np.concatenate((itemind_arr_added, userind_arr))
+        ], dtype=torch.long)
 
-        self.latent_dim = self.args.recdim #config['latent_dim_rec']
+        self.latent_dim = self.args.recdim
         self.__init_weight()
         all_emb = torch.cat([self.embedding_user.weight, self.embedding_item.weight])
         self.graph_data = Data(x=all_emb, edge_index=edge_index).to(self.args.device)
@@ -201,22 +203,25 @@ class LightGCN(BasicModel):
         return self
 
     def reset_all(self):
+        """Reset embeddings and graph"""
         nn.init.normal_(self.embedding_user.weight, std=0.1)
         nn.init.normal_(self.embedding_item.weight, std=0.1)
-        if self.use_pyg:
-            self.edge_index, self.edge_weight = self.dataset.getPyGGraph(self.dataset.UserItemNet)
-        else:
-            self.Graph = self.dataset.getSparseGraph(self.dataset.UserItemNet)
+        self._invalidate_cache()
+        self.reset_graph()
 
     def reset_all_uuii(self):
+        """Reset embeddings and graph with UU and II edges"""
         nn.init.normal_(self.embedding_user.weight, std=0.1)
         nn.init.normal_(self.embedding_item.weight, std=0.1)
+        self._invalidate_cache()
         if self.use_pyg:
             self.edge_index, self.edge_weight = self.dataset.getPyGGraph(self.dataset.UserItemNet)
         else:
             self.Graph = self.dataset.getSparseGraph(self.dataset.UserItemNet, include_uuii=True)
 
     def reset_graph(self):
+        """Reset graph structure"""
+        self._invalidate_cache()
         if self.use_pyg:
             self.edge_index, self.edge_weight = self.dataset.getPyGGraph(self.dataset.UserItemNet)
         else:
@@ -376,21 +381,17 @@ class UltraGCN(nn.Module):
 
     def get_omegas(self, users, pos_items, neg_items):
         device = self.args.device
-        #self.constraint_mat['beta_uD'] = self.constraint_mat['beta_uD'].to(device)
-        #self.constraint_mat['beta_iD'] = self.constraint_mat['beta_iD'].to(device)
         if self.w2 > 0:
             pos_weight = torch.mul(self.constraint_mat['beta_uD'][users], self.constraint_mat['beta_iD'][pos_items]).to(device)
             pow_weight = self.w1 + self.w2 * pos_weight
         else:
             pos_weight = self.w1 * torch.ones(len(pos_items)).to(device)
 
-        # users = (users * self.item_num).unsqueeze(0)
         if self.w4 > 0:
             neg_weight = torch.mul(self.constraint_mat['beta_uD'][users], self.constraint_mat['beta_iD'][neg_items]).to(device)
             neg_weight = self.w3 + self.w4 * neg_weight
         else:
             neg_weight = self.w3 * torch.ones(neg_items.size(0) * neg_items.size(1)).to(device)
-
 
         weight = torch.cat((pow_weight, neg_weight))
         return weight
@@ -417,15 +418,11 @@ class UltraGCN(nn.Module):
 
     def cal_loss_I(self, users, pos_items):
         device = self.args.device
-        #self.ii_neighbor_mat = self.ii_neighbor_mat.to(device)
-        neighbor_embeds = self.item_embeds(self.ii_neighbor_mat[pos_items].to(device))    # len(pos_items) * num_neighbors * dim
-        #self.ii_constraint_mat = self.ii_constraint_mat.to(device)
-        sim_scores = self.ii_constraint_mat[pos_items].to(device)     # len(pos_items) * num_neighbors
+        neighbor_embeds = self.item_embeds(self.ii_neighbor_mat[pos_items].to(device))
+        sim_scores = self.ii_constraint_mat[pos_items].to(device)
         user_embeds = self.user_embeds(users.to(device)).unsqueeze(1)
 
         loss = -sim_scores * (user_embeds * neighbor_embeds).sum(dim=-1).sigmoid().log()
-
-        # loss = loss.sum(-1)
         return loss.sum()
 
     def norm_loss(self):
@@ -833,18 +830,15 @@ class IMP_GCN(BasicModel):
 
         d_inv[np.isinf(d_inv)] = 0.
         d_mat_inv = sp.diags(d_inv)
-        norm_adj = d_mat_inv.dot(adj_mat)
-        norm_adj = norm_adj.dot(d_mat_inv)
-        #print('generate pre adjacency matrix.')
-        pre_adj_mat = norm_adj.tocsr()
-        return pre_adj_mat
+        norm_adj = d_mat_inv.dot(adj_mat).dot(d_mat_inv)
+        return norm_adj.tocsr()
 
     def _convert_sp_mat_to_sp_tensor(self, X):
         coo = X.tocoo().astype(np.float32)
-        indices = np.mat([coo.row, coo.col])#.transpose()
+        indices = np.array([coo.row, coo.col])
         indices = torch.from_numpy(indices).type(torch.LongTensor)
         data = torch.from_numpy(coo.data)
-        return torch.sparse.FloatTensor(indices, data, torch.Size((coo.shape[0], coo.shape[1])))
+        return torch.sparse.FloatTensor(indices, data, torch.Size(coo.shape))
 
     def _split_A_hat(self, X):
         A_fold_hat = []
@@ -886,7 +880,6 @@ class IMP_GCN(BasicModel):
 
                 temp_g = self.sparse_dense_mul(A_fold_hat[i_fold], group_embedding[k].expand(A_fold_hat[i_fold].shape))
                 temp_slice = self.sparse_dense_mul(temp_g, torch.unsqueeze(group_embedding[k][start:end], dim=1).expand(temp_g.shape))
-                #A_fold_hat_item.append(A_fold_hat[i_fold].__mul__(group_embedding[k]).__mul__(torch.unsqueeze(group_embedding[k][start:end], dim=1)))
                 A_fold_hat_item.append(temp_slice)
                 item_filter = torch.sparse.sum(A_fold_hat_item[i_fold], dim=1).to_dense()
                 item_filter = torch.where(item_filter > 0., torch.ones_like(item_filter), torch.zeros_like(item_filter))
@@ -981,7 +974,6 @@ class IMP_GCN(BasicModel):
         mf_loss = torch.mean(maxi)
 
         emb_loss = self.reg_weight * regularizer
-        #reg_loss = 0.0
         return mf_loss, emb_loss
 
 
@@ -1051,19 +1043,9 @@ class EASE(BasicModel):
         # zero out diag
         np.fill_diagonal(B, 0.0)
 
-        # instead of computing and storing the entire score matrix,
-        # just store B and compute the scores on demand
-        # more memory efficient for a larger number of users
-        # but if there's a large number of items not much one can do:
-        # still have to compute B all at once
-        # S = X @ B
-        # self.score_matrix = torch.from_numpy(S).to(self.device)
-
-        # torch doesn't support sparse tensor slicing,
-        # so will do everything with np/scipy
+        # Store B matrix and interaction matrix for on-demand score computation
         self.item_similarity = B
         self.interaction_matrix = X
-        #self.other_parameter_name = ["interaction_matrix", "item_similarity"]
         self.device = self.args.device
 
     def forward(self):
@@ -1210,7 +1192,7 @@ class CDE_CF(BasicModel):
     def __init_weight(self):
         self.num_users  = self.dataset.n_users
         self.num_items  = self.dataset.m_items
-        self.latent_dim = self.args.recdim #self.config['latent_dim_rec']
+        self.latent_dim = self.args.recdim
         self.embedding_user = torch.nn.Embedding(
             num_embeddings=self.num_users, embedding_dim=self.latent_dim)
         self.embedding_item = torch.nn.Embedding(
@@ -1302,7 +1284,7 @@ class ODE_CF(BasicModel):
     def __init_weight(self):
         self.num_users  = self.dataset.n_users
         self.num_items  = self.dataset.m_items
-        self.latent_dim = self.args.recdim #self.config['latent_dim_rec']
+        self.latent_dim = self.args.recdim
         self.embedding_user = torch.nn.Embedding(
             num_embeddings=self.num_users, embedding_dim=self.latent_dim)
         self.embedding_item = torch.nn.Embedding(
@@ -1375,10 +1357,8 @@ class ODE_CF(BasicModel):
     def forward(self, users, items):
         # compute embedding
         all_users, all_items = self.computer()
-        # print('forward')
-        #all_users, all_items = self.computer()
         users_emb = all_users[users]
         items_emb = all_items[items]
         inner_pro = torch.mul(users_emb, items_emb)
-        gamma     = torch.sum(inner_pro, dim=1)
+        gamma = torch.sum(inner_pro, dim=1)
         return gamma

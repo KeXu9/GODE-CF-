@@ -242,7 +242,7 @@ class Loader(BasicDataset):
         try:
             self.UserItemNet = csr_matrix(
                 (np.ones(len(self.trainUser)), (self.trainUser, self.trainItem)),
-                shape=(self.n_user, self.m_item)
+                shape=(self.n_users, self.m_items)
             )
             
             # Validate matrix
@@ -264,7 +264,7 @@ class Loader(BasicDataset):
         
         # Pre-calculate derived structures
         try:
-            self._allPos = self.getUserPosItems(list(range(self.n_user)))
+            self._allPos = self.getUserPosItems(list(range(self.n_users)))
             self.__testDict, self.test_pred_mask_mat = self.__build_test()
             self.__validDict = self.__build_valid()
             self.valid_pred_mask_mat = self.UserItemNet
@@ -336,8 +336,8 @@ class Loader(BasicDataset):
             if len(new_row) != len(new_col) or len(new_row) != len(new_val):
                 raise ValueError("Input arrays must have same length")
             
-            self.UserItemNet = csr_matrix((new_val, (new_row, new_col)), shape=(self.n_user, self.m_item))
-            print('reset graph nnz: ', self.UserItemNet.nnz, ', density: ', self.UserItemNet.nnz/(self.n_user*self.m_item))
+            self.UserItemNet = csr_matrix((new_val, (new_row, new_col)), shape=(self.n_users, self.m_items))
+            print('reset graph nnz: ', self.UserItemNet.nnz, ', density: ', self.UserItemNet.nnz/(self.n_users*self.m_items))
             
             # Recompute degree statistics
             self.users_D = np.array(self.UserItemNet.sum(axis=1)).squeeze()
@@ -401,7 +401,7 @@ class Loader(BasicDataset):
                     warnings.warn("Sparse solve failed, using identity matrix")
                     self.UserUserNet = sp.eye(uuG_sparse.shape[0], format='csr')
 
-            print('uu net nnz: ', self.UserUserNet.nnz, ', density: ', self.UserUserNet.nnz/(self.n_user*self.n_user))
+            print('uu net nnz: ', self.UserUserNet.nnz, ', density: ', self.UserUserNet.nnz/(self.n_users*self.n_users))
 
             # Optimized item-item matrix computation
             print("Computing item-item similarity matrix...")
@@ -445,7 +445,7 @@ class Loader(BasicDataset):
                     warnings.warn("Sparse solve failed, using identity matrix")
                     self.ItemItemNet = sp.eye(iiG_sparse.shape[0], format='csr')
 
-            print('ii net nnz: ', self.ItemItemNet.nnz, ', density: ', self.ItemItemNet.nnz/(self.m_item*self.m_item))
+            print('ii net nnz: ', self.ItemItemNet.nnz, ', density: ', self.ItemItemNet.nnz/(self.m_items*self.m_items))
 
         except Exception as e:
             raise RuntimeError(f"EASE graph reset failed: {e}")
@@ -463,7 +463,7 @@ class Loader(BasicDataset):
 
             # Set UU matrix
             new_uu_row, new_uu_col, new_uu_val = newuudata
-            self.UserUserNet = csr_matrix((new_uu_val, (new_uu_row, new_uu_col)), shape=(self.n_user, self.n_user))
+            self.UserUserNet = csr_matrix((new_uu_val, (new_uu_row, new_uu_col)), shape=(self.n_users, self.n_users))
             # Remove diagonal efficiently
             self.UserUserNet = self.UserUserNet.tolil()
             self.UserUserNet.setdiag(0)
@@ -471,7 +471,7 @@ class Loader(BasicDataset):
 
             # Set II matrix
             new_ii_row, new_ii_col, new_ii_val = newiidata
-            self.ItemItemNet = csr_matrix((new_ii_val, (new_ii_row, new_ii_col)), shape=(self.m_item, self.m_item))
+            self.ItemItemNet = csr_matrix((new_ii_val, (new_ii_row, new_ii_col)), shape=(self.m_items, self.m_items))
             # Remove diagonal efficiently
             self.ItemItemNet = self.ItemItemNet.tolil()
             self.ItemItemNet.setdiag(0)
@@ -483,7 +483,7 @@ class Loader(BasicDataset):
     @property
     def n_users(self):
         return self.n_user
-    
+
     @property
     def m_items(self):
         return self.m_item
@@ -681,7 +681,7 @@ class Loader(BasicDataset):
             # Add validation items to mask
             for i, item in enumerate(self.validItem):
                 user = self.validUser[i]
-                if 0 <= user < self.n_user and 0 <= item < self.m_item:
+                if 0 <= user < self.n_users and 0 <= item < self.m_items:
                     test_pred_mask_mat[user, item] = 1.0
 
             # Convert back to CSR format
@@ -690,7 +690,7 @@ class Loader(BasicDataset):
             test_data = {}
             for i, item in enumerate(self.testItem):
                 user = self.testUser[i]
-                if 0 <= user < self.n_user and 0 <= item < self.m_item:
+                if 0 <= user < self.n_users and 0 <= item < self.m_items:
                     if test_data.get(user):
                         test_data[user].append(item)
                     else:
@@ -706,7 +706,7 @@ class Loader(BasicDataset):
             valid_data = {}
             for i, item in enumerate(self.validItem):
                 user = self.validUser[i]
-                if 0 <= user < self.n_user and 0 <= item < self.m_item:
+                if 0 <= user < self.n_users and 0 <= item < self.m_items:
                     if valid_data.get(user):
                         valid_data[user].append(item)
                     else:
@@ -723,9 +723,9 @@ class Loader(BasicDataset):
                 raise ValueError("Users and items arrays must have same length")
             
             if len(users) > 0:
-                if np.max(users) >= self.n_user or np.min(users) < 0:
+                if np.max(users) >= self.n_users or np.min(users) < 0:
                     raise ValueError("User indices out of bounds")
-                if np.max(items) >= self.m_item or np.min(items) < 0:
+                if np.max(items) >= self.m_items or np.min(items) < 0:
                     raise ValueError("Item indices out of bounds")
             
             return np.array(self.UserItemNet[users, items]).astype('uint8').reshape((-1,))
@@ -739,7 +739,7 @@ class Loader(BasicDataset):
                 return []
                 
             max_user = max(users)
-            if max_user >= self.n_user:
+            if max_user >= self.n_users:
                 raise ValueError(f"User index {max_user} out of bounds")
                 
             posItems = []
