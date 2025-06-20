@@ -87,7 +87,7 @@ class ODEblock(nn.Module):
         self.solver = solver
 
     def forward(self, x):
-        t = self.t.type_as(x)
+        t = self.t.type_as(x).to(x.device)
         z = odeint(self.odefunc, x, t, method=self.solver)[1]
         return z
 
@@ -102,7 +102,7 @@ class ODEBlock(nn.Module):
         self.solver = solver
 
     def forward(self, x):
-        self.integration_time = self.integration_time.type_as(x)
+        self.integration_time = self.integration_time.type_as(x).to(x.device)
         out = odeint(func=self.odefunc, y0=x, t=self.integration_time, method=self.solver)
         return out[1]
 

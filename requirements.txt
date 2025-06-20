@@ -4,4 +4,5 @@ scipy==1.9.1
 numpy==1.21.5
 scikit-learn==1.0.2
 tqdm==4.64.1
-torchdiffeq
+torchdiffeq==0.2.3
+torch-geometric==2.2.0
