@@ -40,17 +40,23 @@ class ODEFunc(nn.Module):
 
 class ODEFunc1(nn.Module):
     """ODE Function with trainable alpha (from ode1.py)"""
-    
+
     def __init__(self, adj, latent_dim, device='cpu'):
         super(ODEFunc1, self).__init__()
         self.g = adj
-        self.alpha_train = 0.9 * torch.ones(adj.shape[1]).to(device)
+        # Fix: Use scalar alpha or per-dimension alpha, not per-node alpha
+        self.alpha_train = nn.Parameter(0.9 * torch.ones(1).to(device))  # Scalar alpha
+        # Alternative: per-dimension alpha
+        # self.alpha_train = nn.Parameter(0.9 * torch.ones(latent_dim).to(device))
 
     def forward(self, t, x):
-        alph = nn.functional.sigmoid(self.alpha_train).unsqueeze(dim=1)
-        ax = torch.spmm(self.g, x)
-        ax = alph * torch.spmm(self.g, ax)
-        f = ax - x
+        # Apply alpha as a scalar multiplier
+        alph = torch.sigmoid(self.alpha_train)  # Shape: [1]
+        ax = torch.spmm(self.g, x)  # First graph convolution
+        ax = alph * torch.spmm(self.g, ax)  # Second graph convolution with alpha weighting
+        # Return the derivative (change rate), not residual
+        # The ODE solver will handle integration: x(t) = x(0) + ∫f(t,x)dt
+        f = ax - x  # This represents dx/dt
         return f
 
 
