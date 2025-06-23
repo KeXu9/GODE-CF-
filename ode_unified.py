@@ -9,7 +9,7 @@ import warnings
 
 
 # =============================================================================
-# ODE Functions (from ode.py and ode1.py) - FIXED
+# ODE Functions
 # =============================================================================
 
 class ODEFunc(nn.Module):
@@ -182,7 +182,7 @@ class ODEFunction(nn.Module):
 
 
 # =============================================================================
-# ODE Blocks (Basic blocks from ode.py and ode1.py) - ENHANCED
+# ODE Blocks
 # =============================================================================
 
 class ODEblock(nn.Module):
@@ -269,7 +269,7 @@ class ODEBlock(nn.Module):
 
 
 # =============================================================================
-# Time-based ODE Blocks - ENHANCED WITH ERROR HANDLING
+# Time-based ODE Blocks
 # =============================================================================
 
 class ODEBlockTimeFirst(nn.Module):

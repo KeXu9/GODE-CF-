@@ -81,13 +81,6 @@ def UniformSample_original(dataset, neg_ratio=1):
 def UniformSample_ultrafast(dataset):
     """
     Ultra-optimized BPR sampling with all performance tricks
-    
-    Performance optimizations:
-    1. Vectorized operations wherever possible
-    2. Pre-computed negative item pools for dense users
-    3. Optimized rejection sampling strategies
-    4. Memory-efficient batch processing
-    5. User density-aware sampling methods
     """
     user_num = dataset.trainDataSize
     allPos = dataset.allPos

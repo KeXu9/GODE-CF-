@@ -248,7 +248,7 @@ class LightGCN(BasicModel):
     
     def computer(self):
         """
-        ULTRA-OPTIMIZED propagation with 3-5x speedup and advanced caching
+        ULTRA-OPTIMIZED propagation
         """
         # Enhanced caching: check both training state and parameters hash
         if (not self.training and self._cache_valid and 
