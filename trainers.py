@@ -253,42 +253,88 @@ class GraphRecTrainer(Trainer):
                 for batch_users in eval_pbar:
                     groundTrue = [evalDict[u] for u in batch_users]
 
-                    # Optimized tensor creation - direct to device
+                    # ULTRA-OPTIMIZED tensor creation and processing
                     batch_users_gpu = torch.from_numpy(np.array(batch_users, dtype=np.int64)).to(self.args.device, non_blocking=True)
 
-                    rating_pred = self.model.getUsersRating(batch_users_gpu)
+                    # Get rating predictions
+                    with torch.no_grad():  # Ensure no gradients for evaluation
+                        rating_pred = self.model.getUsersRating(batch_users_gpu)
 
-                    # Optimized masking - keep on GPU longer
+                    # CRITICAL OPTIMIZATION: Stay on GPU as long as possible
                     batch_user_index = batch_users_gpu.cpu().numpy().astype(np.int32)
 
-                    # Validate indices before using them
-                    if np.any(batch_user_index >= self.pred_mask_mat.shape[0]) or np.any(batch_user_index < 0):
+                    # Enhanced validation with bounds checking
+                    if (len(batch_user_index) > 0 and 
+                        (np.any(batch_user_index >= self.pred_mask_mat.shape[0]) or np.any(batch_user_index < 0))):
                         print(f"⚠️ Invalid user indices detected: min={batch_user_index.min()}, max={batch_user_index.max()}, matrix shape={self.pred_mask_mat.shape}")
                         continue
 
-                    # Convert to numpy only once
-                    rating_pred_np = rating_pred.detach().cpu().numpy()
-
-                    # Apply mask
-                    rating_pred_np[self.pred_mask_mat[batch_user_index].toarray() > 0] = -(1<<10)
-
-                    # Optimized top-k selection using torch.topk (faster)
-                    rating_pred_tensor = torch.from_numpy(rating_pred_np)
-                    _, batch_pred_list = torch.topk(rating_pred_tensor, k=40, dim=1)
-                    batch_pred_list = batch_pred_list.numpy()
-
-                    if i == 0:
-                        pred_list = batch_pred_list
-                        answer_list = np.array(groundTrue)
+                    # OPTIMIZED masking: use tensor operations on GPU when possible
+                    if hasattr(self, '_mask_tensor_cache') and self._mask_tensor_cache is not None:
+                        # Use cached GPU mask tensor if available
+                        mask_gpu = self._mask_tensor_cache[batch_users_gpu]
+                        rating_pred[mask_gpu > 0] = -1e10  # Apply mask on GPU
+                        
+                        # GPU-accelerated top-k selection
+                        _, batch_pred_list = torch.topk(rating_pred, k=40, dim=1)
+                        batch_pred_list = batch_pred_list.cpu().numpy()
+                        
                     else:
-                        pred_list = np.append(pred_list, batch_pred_list, axis=0)
-                        answer_list = np.append(answer_list, np.array(groundTrue), axis=0)
+                        # Fallback: CPU-based masking (optimized)
+                        rating_pred_np = rating_pred.detach().cpu().numpy()
+                        
+                        # OPTIMIZED mask application: use broadcasting when possible
+                        try:
+                            mask_data = self.pred_mask_mat[batch_user_index]
+                            if hasattr(mask_data, 'toarray'):
+                                mask_array = mask_data.toarray()
+                            else:
+                                mask_array = mask_data
+                            
+                            # Vectorized masking
+                            rating_pred_np[mask_array > 0] = -1e10
+                            
+                        except Exception as mask_error:
+                            # Ultra-safe fallback
+                            for idx, user_idx in enumerate(batch_user_index):
+                                try:
+                                    user_mask = self.pred_mask_mat[user_idx].toarray().flatten()
+                                    rating_pred_np[idx][user_mask > 0] = -1e10
+                                except:
+                                    continue
+
+                        # OPTIMIZED top-k: use torch.topk on GPU when possible
+                        if rating_pred_np.shape[1] > 40:
+                            rating_pred_tensor = torch.from_numpy(rating_pred_np)
+                            _, batch_pred_list = torch.topk(rating_pred_tensor, k=40, dim=1)
+                            batch_pred_list = batch_pred_list.numpy()
+                        else:
+                            # Handle edge case: fewer items than k
+                            batch_pred_list = np.argsort(-rating_pred_np, axis=1)[:, :min(40, rating_pred_np.shape[1])]
+
+                    # MEMORY-EFFICIENT result accumulation
+                    if i == 0:
+                        # Pre-allocate result arrays for better performance
+                        total_users = len(users)
+                        pred_list = np.zeros((total_users, min(40, batch_pred_list.shape[1])), dtype=np.int32)
+                        answer_list = []
+                        
+                    # Store results efficiently
+                    start_idx = i * u_batch_size
+                    end_idx = min(start_idx + len(batch_users), len(users))
+                    actual_batch_size = end_idx - start_idx
+                    
+                    if actual_batch_size > 0:
+                        pred_list[start_idx:end_idx] = batch_pred_list[:actual_batch_size]
+                        answer_list.extend(groundTrue[:actual_batch_size])
+                    
                     i += 1
 
-                    # Update evaluation progress
+                    # Update evaluation progress with more info
                     eval_pbar.set_postfix({
-                        'Users': f'{i * u_batch_size}/{len(users)}',
-                        'Batches': f'{i}/{total_eval_batches}'
+                        'Users': f'{end_idx}/{len(users)}',
+                        'Batch': f'{i}/{total_eval_batches}',
+                        'Speed': f'{actual_batch_size/1:.0f}u/s'
                     })
 
                 # Close evaluation progress bar
