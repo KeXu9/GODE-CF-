@@ -49,23 +49,6 @@ def pstore(x: Any, path: str) -> None:
         raise RuntimeError(f"Failed to store to {path}: {str(e)}")
 
 
-def load_file_with_progress(file_path: str, chunk_size: int = 8192) -> List[str]:
-    """Load file with progress tracking and memory optimization"""
-    file_size = os.path.getsize(file_path)
-    lines = []
-    
-    with open(file_path, 'r', buffering=chunk_size) as f:
-        with tqdm(total=file_size, unit='B', unit_scale=True, desc="Loading file") as pbar:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                lines.extend(line.strip() for line in chunk.split('\n') if line.strip())
-                pbar.update(len(chunk.encode('utf-8')))
-    
-    return lines
-
-
 class BasicDataset(Dataset):
     def __init__(self):
         print("init dataset")
@@ -116,19 +99,6 @@ class BasicDataset(Dataset):
 
 class Loader(BasicDataset):
 
-    def _load_large_file_optimized(self, file_path: str) -> List[str]:
-        """Optimized loading for large files using memory mapping"""
-        try:
-            with open(file_path, 'r') as f:
-                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mmapped_file:
-                    content = mmapped_file.read().decode('utf-8')
-                    lines = [line.strip() for line in content.split('\n') if line.strip()]
-            return lines
-        except Exception as e:
-            logger.warning(f"Memory mapping failed, falling back to normal loading: {e}")
-            with open(file_path, 'r', buffering=16384) as f:
-                return [line.strip() for line in f if line.strip()]
-
     def __init__(self, args):
         super().__init__()
         # Basic configuration
@@ -141,31 +111,19 @@ class Loader(BasicDataset):
         self.m_item = 0
         self.path = './data/'
         
-        # Performance tracking
-        print(f"🚀 Loading data from {data_file}")
+        # Initialize data structures with estimated capacity for better performance
+        print(f"Loading data from {data_file}")
         start_time = time()
 
         # Load and validate data file
         if not os.path.exists(data_file):
             raise FileNotFoundError(f"Data file not found: {data_file}")
 
-        # Get file size for progress tracking
-        file_size = os.path.getsize(data_file)
-        print(f"📁 File size: {file_size / (1024*1024):.2f} MB")
+        # First pass: count lines and estimate capacity
+        with open(data_file, 'r') as f:
+            num_lines = sum(1 for _ in f if _.strip())
 
-        # Optimized file loading with memory mapping for large files
-        if file_size > 100 * 1024 * 1024:  # 100MB threshold
-            print("📊 Large file detected, using memory mapping")
-            lines = self._load_large_file_optimized(data_file)
-        else:
-            print("📊 Loading file normally")
-            with open(data_file, 'r', buffering=8192) as f:
-                lines = [line.strip() for line in f if line.strip()]
-
-        num_lines = len(lines)
-        print(f"📈 Processing {num_lines:,} lines")
-
-        # Pre-allocate optimized data structures
+        # Pre-allocate lists with estimated capacity
         train_data = defaultdict(list)
         valid_data = defaultdict(list)
         test_data = defaultdict(list)
@@ -174,189 +132,122 @@ class Loader(BasicDataset):
         self.validSize = 0
         self.testSize = 0
 
-        # Process data with vectorized operations for better performance
-        print("🔄 Processing user interactions...")
+        # Process data file with optimized I/O
         try:
-            # Vectorized processing with progress tracking
-            from tqdm import tqdm
-            
-            # Process lines in batches for better memory efficiency
-            batch_size = min(10000, max(1000, num_lines // 100))
-            processed_lines = 0
-            
-            for batch_start in tqdm(range(0, num_lines, batch_size), 
-                                  desc="Processing batches", unit="batch"):
-                batch_end = min(batch_start + batch_size, num_lines)
-                batch_lines = lines[batch_start:batch_end]
-                
-                for line_num, line in enumerate(batch_lines, batch_start + 1):
+            with open(data_file, 'r') as f:
+                for line_num, line in enumerate(f, 1):
                     try:
+                        line = line.strip()
                         if not line:  # Skip empty lines
                             continue
 
-                        # Optimized parsing with pre-split
+                        # Optimized parsing
                         parts = line.split(' ')
                         if len(parts) < 4:  # user + at least 3 items
+                            warnings.warn(f"User at line {line_num} has insufficient items ({len(parts)-1})")
                             continue
 
-                        # Vectorized conversion with error handling
-                        try:
-                            uid = int(parts[0]) - 1
-                            itemids = [int(item) - 1 for item in parts[1:]]
-                        except ValueError:
-                            continue
+                        uid = int(parts[0]) - 1
+                        itemids = [int(item) - 1 for item in parts[1:]]
 
-                        # Validate indices (batch operation)
+                        # Validate indices
                         if uid < 0 or any(item_id < 0 for item_id in itemids):
+                            warnings.warn(f"Invalid indices at line {line_num}")
                             continue
 
-                        # Update max indices efficiently
+                        # Update max indices
                         self.n_user = max(self.n_user, uid)
-                        if itemids:
-                            self.m_item = max(self.m_item, max(itemids))
+                        self.m_item = max(self.m_item, max(itemids))
 
-                        # Optimized data splitting
-                        if len(itemids) >= 2:
-                            train_items = itemids[:-2] if len(itemids) > 2 else []
-                            valid_item = itemids[-2]
-                            test_item = itemids[-1]
+                        # Split data efficiently: train (all except last 2), valid (second to last), test (last)
+                        train_items = itemids[:-2]
+                        valid_item = itemids[-2]
+                        test_item = itemids[-1]
 
-                            # Store with pre-allocation awareness
-                            if train_items:
-                                train_data[uid].extend(train_items)
-                                self.trainSize += len(train_items)
+                        # Store in dictionaries for efficient access
+                        if train_items:
+                            train_data[uid].extend(train_items)
+                            self.trainSize += len(train_items)
 
-                            valid_data[uid].append(valid_item)
-                            self.validSize += 1
+                        valid_data[uid].append(valid_item)
+                        self.validSize += 1
 
-                            test_data[uid].append(test_item)
-                            self.testSize += 1
+                        test_data[uid].append(test_item)
+                        self.testSize += 1
 
-                        processed_lines += 1
-
-                    except Exception as e:
-                        # Skip problematic lines but continue processing
+                    except (ValueError, IndexError) as e:
+                        warnings.warn(f"Error processing line {line_num}: {e}")
                         continue
-
-            print(f"✅ Processed {processed_lines:,} valid lines")
 
         except Exception as e:
             raise RuntimeError(f"Failed to process data file: {e}")
 
-        # Memory cleanup
-        del lines  # Free memory early
-        
-        # Convert to numpy arrays efficiently with pre-allocation
-        print("🔄 Converting to optimized arrays...")
-        
-        # Pre-calculate sizes for efficient allocation
-        total_train_size = self.trainSize
-        total_valid_size = self.validSize
-        total_test_size = self.testSize
-        
-        # Pre-allocate arrays for better performance
-        trainUser = np.empty(total_train_size, dtype=np.int32)
-        trainItem = np.empty(total_train_size, dtype=np.int32)
-        validUser = np.empty(total_valid_size, dtype=np.int32)
-        validItem = np.empty(total_valid_size, dtype=np.int32)
-        testUser = np.empty(total_test_size, dtype=np.int32)
-        testItem = np.empty(total_test_size, dtype=np.int32)
-        
+        # Convert to numpy arrays efficiently
+        trainUser, trainItem = [], []
+        validUser, validItem = [], []
+        testUser, testItem = [], []
         trainUniqueUsers, validUniqueUsers, testUniqueUsers = [], [], []
-        
-        # Efficient array filling
-        train_idx = valid_idx = test_idx = 0
 
-        # Vectorized array filling for better performance
         for uid in train_data:
             items = train_data[uid]
-            num_items = len(items)
-            if num_items > 0:
-                trainUniqueUsers.append(uid)
-                trainUser[train_idx:train_idx + num_items] = uid
-                trainItem[train_idx:train_idx + num_items] = items
-                train_idx += num_items
+            trainUniqueUsers.append(uid)
+            trainUser.extend([uid] * len(items))
+            trainItem.extend(items)
 
         for uid in valid_data:
             items = valid_data[uid]
-            num_items = len(items)
-            if num_items > 0:
-                validUniqueUsers.append(uid)
-                validUser[valid_idx:valid_idx + num_items] = uid
-                validItem[valid_idx:valid_idx + num_items] = items
-                valid_idx += num_items
+            validUniqueUsers.append(uid)
+            validUser.extend([uid] * len(items))
+            validItem.extend(items)
 
         for uid in test_data:
             items = test_data[uid]
-            num_items = len(items)
-            if num_items > 0:
-                testUniqueUsers.append(uid)
-                testUser[test_idx:test_idx + num_items] = uid
-                testItem[test_idx:test_idx + num_items] = items
-                test_idx += num_items
+            testUniqueUsers.append(uid)
+            testUser.extend([uid] * len(items))
+            testItem.extend(items)
 
-        # Convert unique users to numpy arrays with proper sizing
-        self.trainUniqueUsers = np.array(trainUniqueUsers, dtype=np.int32)
-        self.trainUser = trainUser[:train_idx]  # Trim to actual size
-        self.trainItem = trainItem[:train_idx]
+        # Convert to numpy arrays and adjust indices
+        self.trainUniqueUsers = np.array(trainUniqueUsers)
+        self.trainUser = np.array(trainUser)
+        self.trainItem = np.array(trainItem)
 
         self.m_item += 1
         self.n_user += 1
         
-        self.testUniqueUsers = np.array(testUniqueUsers, dtype=np.int32)
-        self.testUser = testUser[:test_idx]
-        self.testItem = testItem[:test_idx]
+        self.testUniqueUsers = np.array(testUniqueUsers)
+        self.testUser = np.array(testUser)
+        self.testItem = np.array(testItem)
 
-        self.validUniqueUsers = np.array(validUniqueUsers, dtype=np.int32)
-        self.validUser = validUser[:valid_idx]
-        self.validItem = validItem[:valid_idx]
-        
-        # Memory cleanup - free temporary data structures
-        del train_data, valid_data, test_data
-        del trainUniqueUsers, validUniqueUsers, testUniqueUsers
+        self.validUniqueUsers = np.array(validUniqueUsers)
+        self.validUser = np.array(validUser)
+        self.validItem = np.array(validItem)
         
         # Initialize graph
         self.Graph = None
         self.edge_index = None  # PyG format
         self.edge_weight = None
         
-        # Log basic statistics with improved formatting
+        # Log basic statistics
         load_time = time() - start_time
-        print(f"⚡ Data loaded in {load_time:.2f}s")
-        print(f"👥 Users: {self.n_users:,} | 🛍️  Items: {self.m_items:,}")
-        print(f"🎯 Train: {self.trainSize:,} | ✅ Valid: {self.validSize:,} | 🧪 Test: {self.testSize:,}")
+        print(f"Data loaded in {load_time:.2f}s")
+        print(f"#of users: {self.n_users} and #of items: {self.m_items}")
+        print(f"{self.trainSize} interactions for training")
+        print(f"{self.validSize} interactions for validation")
+        print(f"{self.testSize} interactions for testing")
         
         sparsity = (self.trainSize + self.validSize + self.testSize) / self.n_users / self.m_items
-        print(f"📊 {self.args.data_name} Sparsity: {sparsity:.6f} ({sparsity*100:.4f}%)")
+        print(f"{self.args.data_name} Sparsity : {sparsity}")
 
-        # Build optimized user-item interaction matrix
-        print("🏗️  Building user-item matrix...")
+        # Build user-item interaction matrix with validation
         try:
-            # Pre-validate data before matrix creation
-            if len(self.trainUser) == 0 or len(self.trainItem) == 0:
-                raise ValueError("No training data available")
-            
-            if np.max(self.trainUser) >= self.n_users or np.max(self.trainItem) >= self.m_items:
-                raise ValueError("Index out of bounds in training data")
-            
-            # Create sparse matrix with optimized parameters
             self.UserItemNet = csr_matrix(
-                (np.ones(len(self.trainUser), dtype=np.float32), 
-                 (self.trainUser, self.trainItem)),
-                shape=(self.n_users, self.m_items),
-                dtype=np.float32
+                (np.ones(len(self.trainUser)), (self.trainUser, self.trainItem)),
+                shape=(self.n_users, self.m_items)
             )
             
-            # Validate and optimize matrix
+            # Validate matrix
             if self.UserItemNet.nnz == 0:
                 raise ValueError("User-item matrix is empty")
-            
-            # Eliminate duplicates and sort for better performance
-            self.UserItemNet.eliminate_zeros()
-            self.UserItemNet.sort_indices()
-            
-            print(f"✅ Matrix created: {self.UserItemNet.nnz:,} non-zeros, "
-                  f"density: {self.UserItemNet.nnz/(self.n_users*self.m_items)*100:.4f}%")
                 
         except Exception as e:
             raise RuntimeError(f"Failed to create user-item matrix: {e}")
