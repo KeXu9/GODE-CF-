@@ -57,11 +57,10 @@ I have completely revolutionized the sampling implementation in the GODE-CF proj
 ## 🏗️ Architecture Overview
 
 ### Implementation Hierarchy:
-1. **`UniformSample_ultimate()`** - The absolute pinnacle implementation
-2. **`UltraAdvancedSampler`** - Core optimization engine
-3. **`AdvancedSampler`** - Advanced vectorized implementation
-4. **`UniformSample_optimized()`** - Previous optimized version
-5. **`UniformSample_baseline()`** - Reference implementation
+1. **`UniformSample_original()`** - Main entry point (calls ultimate implementation)
+2. **`UniformSample_ultimate()`** - The absolute pinnacle implementation
+3. **`UltraAdvancedSampler`** - Core optimization engine with all advanced features
+4. **`UniformSample_baseline()`** - Simple reference implementation for comparison
 
 ### Key Components:
 
@@ -154,31 +153,32 @@ self.random_permutations = {}   # Deterministic speedup patterns
 
 ### **Basic Usage** (Drop-in replacement):
 ```python
-# The optimized sampling is now the default
+# The ultimate optimized sampling is now the default
 samples = UniformSample_original(dataset)
 ```
 
 ### **Advanced Configuration**:
 ```python
-# Access the ultra-advanced sampler directly
-sampler = UltraAdvancedSampler(dataset)
-samples = sampler.sample_ultra_parallel(user_samples)
+# Access the ultra-advanced sampler directly for fine-tuning
+if hasattr(dataset, '_ultra_advanced_sampler'):
+    sampler = dataset._ultra_advanced_sampler
+    sampler.n_workers = 16  # Increase for more cores
+    sampler.batch_size_threshold = 5000  # Tune for your dataset
 ```
 
-### **Performance Tuning**:
+### **Fallback Option**:
 ```python
-# Adjust parallel processing settings
-sampler.n_workers = 16  # Increase for more cores
-sampler.batch_size_threshold = 5000  # Tune for your dataset
+# Simple baseline for comparison or as fallback
+samples = UniformSample_baseline(dataset)
 ```
 
 ## 🚀 Production Deployment
 
 ### **Recommendations**:
-1. **Use `UniformSample_ultimate()`** for maximum performance
+1. **Use `UniformSample_original()`** for maximum performance (it automatically uses the ultimate implementation)
 2. **Monitor memory usage** on large datasets
-3. **Profile your specific workload** to tune parameters
-4. **Consider GPU acceleration** for extremely large datasets
+3. **Profile your specific workload** to tune sampler parameters
+4. **Use `UniformSample_baseline()`** only for comparison or debugging
 
 ### **Scaling Considerations**:
 - **Small datasets** (< 10K interactions): Sequential processing sufficient

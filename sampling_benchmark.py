@@ -22,8 +22,6 @@ warnings.filterwarnings("ignore")
 sys.path.append('.')
 from utils import (
     UniformSample_original, 
-    UniformSample_ultrafast, 
-    UniformSample_optimized, 
     UniformSample_baseline
 )
 
@@ -203,8 +201,7 @@ class SamplingBenchmark:
         # Implementations to test
         implementations = {
             "Baseline": UniformSample_baseline,
-            "Optimized": UniformSample_optimized,
-            "UltraFast": UniformSample_ultrafast,
+            "Ultimate": UniformSample_original,
         }
         
         all_results = []
@@ -409,16 +406,16 @@ class SamplingBenchmark:
             fastest_overall = df.loc[df['avg_time'].idxmin()]
             f.write(f"🏆 Use '{fastest_overall['implementation']}' for best overall performance\n")
             
-            if 'UltraFast' in df['implementation'].values:
-                ultrafast_data = df[df['implementation'] == 'UltraFast']
+            if 'Ultimate' in df['implementation'].values:
+                ultimate_data = df[df['implementation'] == 'Ultimate']
                 baseline_data = df[df['implementation'] == 'Baseline']
                 
                 if not baseline_data.empty:
                     avg_speedup = (baseline_data['avg_time'].mean() / 
-                                 ultrafast_data['avg_time'].mean())
-                    f.write(f"🚀 UltraFast implementation provides {avg_speedup:.1f}x average speedup\n")
+                                 ultimate_data['avg_time'].mean())
+                    f.write(f"🚀 Ultimate implementation provides {avg_speedup:.1f}x average speedup\n")
             
-            f.write("💡 For production use, prioritize the UltraFast implementation\n")
+            f.write("💡 For production use, prioritize the Ultimate implementation\n")
             f.write("🔧 Monitor memory usage for large-scale datasets\n")
         
         print(f"📝 Detailed report saved to '{filename}'")
