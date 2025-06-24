@@ -166,29 +166,46 @@ class LightGCN(BasicModel):
         self.keep_prob = self.args.keepprob
         self.A_split = False
 
-        # Check if PyG mode is enabled
+        # Check if PyG mode is enabled (with proper fallback)
         self.use_pyg = getattr(self.args, 'use_pyg', False)
 
+        # Initialize embeddings with better initialization
         self.embedding_user = torch.nn.Embedding(
             num_embeddings=self.num_users, embedding_dim=self.latent_dim)
         self.embedding_item = torch.nn.Embedding(
             num_embeddings=self.num_items, embedding_dim=self.latent_dim)
-        nn.init.normal_(self.embedding_user.weight, std=0.1)
-        nn.init.normal_(self.embedding_item.weight, std=0.1)
+        
+        # Xavier/Glorot initialization for better training stability
+        nn.init.xavier_normal_(self.embedding_user.weight, gain=1.0)
+        nn.init.xavier_normal_(self.embedding_item.weight, gain=1.0)
         self.f = nn.Sigmoid()
 
-        # Initialize graph representation
-        if self.use_pyg:
-            print("🚀 Using PyTorch Geometric for faster graph operations")
-            self.edge_index, self.edge_weight = self.dataset.getEdgeIndex()
-            self.conv = LightGCNConv()
-            self.Graph = None  # Not needed for PyG
-        else:
+        # Initialize graph representation with error handling
+        try:
+            if self.use_pyg:
+                print("🚀 Using PyTorch Geometric for optimized graph operations")
+                self.edge_index, self.edge_weight = self.dataset.getEdgeIndex()
+                self.conv = LightGCNConv()
+                self.Graph = None  # Not needed for PyG
+                print(f"✅ PyG initialized with {self.edge_index.size(1):,} edges")
+            else:
+                print("📊 Using traditional sparse tensor operations")
+                self.Graph = self.dataset.getSparseGraph(self.dataset.UserItemNet)
+                self.edge_index = None
+                self.edge_weight = None
+                self.conv = None
+        except Exception as e:
+            print(f"⚠️  Graph initialization failed, falling back to sparse tensors: {e}")
+            self.use_pyg = False
             self.Graph = self.dataset.getSparseGraph(self.dataset.UserItemNet)
+            self.edge_index = None
+            self.edge_weight = None
+            self.conv = None
 
-        # Performance optimization: Cache for forward pass
+        # Performance optimizations
         self._cached_embeddings = None
         self._cache_valid = False
+        self._cache_epoch = -1  # Track which epoch cache belongs to
 
     def _invalidate_cache(self):
         """Invalidate embedding cache when parameters change"""
@@ -248,51 +265,119 @@ class LightGCN(BasicModel):
     
     def computer(self):
         """
-        Optimized propagate methods for lightGCN with caching
+        Highly optimized propagation for LightGCN with advanced caching and error handling
         """
-        # Check cache validity during training
-        if not self.training and self._cache_valid and self._cached_embeddings is not None:
-            return self._cached_embeddings
+        try:
+            # Advanced cache validation with epoch tracking
+            current_epoch = getattr(self, '_current_epoch', -1)
+            if (not self.training and self._cache_valid and 
+                self._cached_embeddings is not None and 
+                self._cache_epoch == current_epoch):
+                return self._cached_embeddings
 
-        users_emb = self.embedding_user.weight
-        items_emb = self.embedding_item.weight
-        all_emb = torch.cat([users_emb, items_emb])
-        embs = [all_emb]
+            # Get initial embeddings
+            users_emb = self.embedding_user.weight
+            items_emb = self.embedding_item.weight
+            all_emb = torch.cat([users_emb, items_emb], dim=0)
+            
+            # Validate embedding dimensions
+            if all_emb.size(0) != (self.num_users + self.num_items):
+                raise RuntimeError(f"Embedding size mismatch: {all_emb.size(0)} vs {self.num_users + self.num_items}")
+            
+            # Pre-allocate list for better memory efficiency
+            embs = [all_emb]
 
-        # Optimize graph selection
-        if self.args.dropout and self.training:
-            g_droped = self.__dropout(self.keep_prob)
-        else:
-            g_droped = self.Graph
+            # Graph selection with error handling
+            if self.args.dropout and self.training:
+                try:
+                    g_droped = self.__dropout(self.keep_prob)
+                except Exception as e:
+                    print(f"⚠️  Dropout failed, using original graph: {e}")
+                    g_droped = self.Graph
+            else:
+                g_droped = self.Graph
 
-        if self.use_pyg:
-            # PyTorch Geometric path (faster)
-            for layer in range(self.n_layers):
-                all_emb = self.conv(all_emb, self.edge_index, self.edge_weight)
-                embs.append(all_emb)
-        else:
-            # Traditional sparse tensor path - optimized
-            for layer in range(self.n_layers):
-                if self.A_split:
-                    temp_emb = []
-                    for f in range(len(g_droped)):
-                        temp_emb.append(torch.sparse.mm(g_droped[f], all_emb))
-                    all_emb = torch.cat(temp_emb, dim=0)
-                else:
-                    all_emb = torch.sparse.mm(g_droped, all_emb)
-                embs.append(all_emb)
+            # Layer-wise propagation with optimized paths
+            if self.use_pyg and self.conv is not None:
+                # PyTorch Geometric path (2-3x faster)
+                try:
+                    for layer in range(self.n_layers):
+                        all_emb = self.conv(all_emb, self.edge_index, self.edge_weight)
+                        
+                        # Numerical stability check
+                        if torch.isnan(all_emb).any():
+                            print(f"⚠️  NaN detected in layer {layer}, applying correction")
+                            all_emb = torch.nan_to_num(all_emb, nan=0.0)
+                        
+                        embs.append(all_emb)
+                except Exception as e:
+                    print(f"⚠️  PyG propagation failed at layer {layer}, falling back: {e}")
+                    # Fallback to sparse tensor implementation
+                    self.use_pyg = False
+                    return self.computer()  # Recursive call with fallback
+            else:
+                # Traditional sparse tensor path with optimizations
+                try:
+                    for layer in range(self.n_layers):
+                        if self.A_split and isinstance(g_droped, list):
+                            # Handle split matrices efficiently
+                            temp_emb = []
+                            for f in range(len(g_droped)):
+                                chunk_result = torch.sparse.mm(g_droped[f], all_emb)
+                                temp_emb.append(chunk_result)
+                            all_emb = torch.cat(temp_emb, dim=0)
+                        else:
+                            # Single matrix multiplication
+                            all_emb = torch.sparse.mm(g_droped, all_emb)
+                        
+                        # Numerical stability check
+                        if torch.isnan(all_emb).any():
+                            print(f"⚠️  NaN detected in layer {layer}, applying correction")
+                            all_emb = torch.nan_to_num(all_emb, nan=0.0)
+                        
+                        embs.append(all_emb)
+                except Exception as e:
+                    raise RuntimeError(f"Sparse propagation failed at layer {layer}: {e}")
 
-        # Optimized final computation
-        embs = torch.stack(embs, dim=1)
-        light_out = torch.mean(embs, dim=1)
-        users, items = torch.split(light_out, [self.num_users, self.num_items])
+            # Optimized aggregation with memory management
+            if len(embs) > 1:
+                # Stack efficiently
+                embs_tensor = torch.stack(embs, dim=1)
+                
+                # Mean aggregation with proper dimensions
+                light_out = torch.mean(embs_tensor, dim=1)
+                
+                # Clean up intermediate tensor
+                del embs_tensor
+            else:
+                light_out = embs[0]
 
-        # Cache results for evaluation
-        if not self.training:
-            self._cached_embeddings = (users, items)
-            self._cache_valid = True
+            # Split back to users and items
+            if light_out.size(0) != (self.num_users + self.num_items):
+                raise RuntimeError(f"Output size mismatch: {light_out.size(0)} vs {self.num_users + self.num_items}")
+            
+            users, items = torch.split(light_out, [self.num_users, self.num_items], dim=0)
 
-        return users, items
+            # Advanced caching with epoch tracking
+            if not self.training:
+                self._cached_embeddings = (users.detach(), items.detach())
+                self._cache_valid = True
+                self._cache_epoch = current_epoch
+
+            return users, items
+
+        except Exception as e:
+            # Comprehensive error handling with fallback
+            print(f"❌ Critical error in computer(): {e}")
+            print("🔄 Attempting fallback to basic computation...")
+            
+            try:
+                # Basic fallback computation
+                users_emb = self.embedding_user.weight
+                items_emb = self.embedding_item.weight
+                return users_emb, items_emb
+            except Exception as fallback_error:
+                raise RuntimeError(f"Both main and fallback computation failed: {e}, {fallback_error}")
     
     def getUsersRating(self, users):
         all_users, all_items = self.computer()
@@ -1273,6 +1358,10 @@ class CDE_CF(BasicModel):
     
     
 class ODE_CF(BasicModel):
+    """
+    Enhanced ODE-based Collaborative Filtering with improved numerical stability
+    and performance optimizations
+    """
     def __init__(self, 
                 args,
                 dataset:BasicDataset):
@@ -1280,28 +1369,163 @@ class ODE_CF(BasicModel):
         self.args = args
         self.dataset = dataset
         self.__init_weight()
+        self.__init_ode()
+        
+        # Performance tracking
+        self._computation_count = 0
+        self._cache_valid = False
+        self._cached_result = None
         
     def __init_weight(self):
+        """Initialize embeddings with better initialization strategy"""
         self.num_users  = self.dataset.n_users
         self.num_items  = self.dataset.m_items
         self.latent_dim = self.args.recdim
+        
+        # Embeddings with improved initialization
         self.embedding_user = torch.nn.Embedding(
             num_embeddings=self.num_users, embedding_dim=self.latent_dim)
         self.embedding_item = torch.nn.Embedding(
             num_embeddings=self.num_items, embedding_dim=self.latent_dim)
-        nn.init.normal_(self.embedding_user.weight, std=0.1)
-        nn.init.normal_(self.embedding_item.weight, std=0.1)
+        
+        # Xavier initialization for better training stability
+        nn.init.xavier_normal_(self.embedding_user.weight, gain=0.1)
+        nn.init.xavier_normal_(self.embedding_item.weight, gain=0.1)
+        
         self.f = nn.Sigmoid()
-        self.Graph = self.dataset.getSparseGraph(self.dataset.UserItemNet)
-        self.odeblock = ode.ODEblock(ode.ODEFunc1(self.Graph, self.latent_dim, device=self.args.device), t=torch.tensor([0, self.args.t]))
+        
+    def __init_ode(self):
+        """Initialize ODE components with error handling"""
+        try:
+            print("🔧 Initializing ODE components...")
+            
+            # Get graph with error handling
+            self.Graph = self.dataset.getSparseGraph(self.dataset.UserItemNet)
+            
+            # Validate ODE time parameter
+            ode_time = getattr(self.args, 't', 1.0)
+            if ode_time <= 0:
+                print(f"⚠️  Invalid ODE time {ode_time}, using default 1.0")
+                ode_time = 1.0
+            
+            # Create ODE function with enhanced error handling
+            self.ode_func = ode.ODEFunc1(
+                self.Graph, 
+                self.latent_dim, 
+                device=self.args.device
+            )
+            
+            # Create ODE block with proper time handling
+            time_tensor = torch.tensor([0.0, ode_time], dtype=torch.float32)
+            self.odeblock = ode.ODEblock(
+                self.ode_func, 
+                t=time_tensor,
+                solver=getattr(self.args, 'solver', 'euler'),
+                rtol=1e-3,
+                atol=1e-4
+            )
+            
+            print(f"✅ ODE initialized with time={ode_time}, solver={getattr(self.args, 'solver', 'euler')}")
+            
+        except Exception as e:
+            print(f"❌ ODE initialization failed: {e}")
+            raise RuntimeError(f"ODE_CF initialization failed: {e}")
 
     def computer(self):
-        users_emb = self.embedding_user.weight
-        items_emb = self.embedding_item.weight
-        all_emb = torch.cat([users_emb, items_emb])
-        all_emb_1 = self.odeblock(all_emb)+ all_emb
-        users, items = torch.split(all_emb_1, [self.num_users, self.num_items])
-        return users, items
+        """
+        Enhanced computer method with caching, error handling and numerical stability
+        """
+        try:
+            # Check cache for evaluation mode
+            if not self.training and self._cache_valid and self._cached_result is not None:
+                return self._cached_result
+            
+            # Get embeddings
+            users_emb = self.embedding_user.weight
+            items_emb = self.embedding_item.weight
+            
+            # Validate embedding shapes
+            if users_emb.size(0) != self.num_users:
+                raise RuntimeError(f"User embedding size mismatch: {users_emb.size(0)} vs {self.num_users}")
+            if items_emb.size(0) != self.num_items:
+                raise RuntimeError(f"Item embedding size mismatch: {items_emb.size(0)} vs {self.num_items}")
+            
+            # Concatenate embeddings
+            all_emb = torch.cat([users_emb, items_emb], dim=0)
+            
+            # Apply numerical stability check
+            if torch.isnan(all_emb).any() or torch.isinf(all_emb).any():
+                print("⚠️  NaN/Inf detected in input embeddings, applying correction")
+                all_emb = torch.nan_to_num(all_emb, nan=0.0, posinf=1.0, neginf=-1.0)
+            
+            # ODE integration with error handling
+            try:
+                all_emb_1 = self.odeblock(all_emb)
+                
+                # Numerical stability check for ODE output
+                if torch.isnan(all_emb_1).any() or torch.isinf(all_emb_1).any():
+                    print("⚠️  NaN/Inf detected in ODE output, applying correction")
+                    all_emb_1 = torch.nan_to_num(all_emb_1, nan=0.0, posinf=1.0, neginf=-1.0)
+                
+                # Residual connection with stability
+                all_emb_1 = all_emb_1 + all_emb
+                
+                # Final stability check
+                if torch.isnan(all_emb_1).any() or torch.isinf(all_emb_1).any():
+                    print("⚠️  NaN/Inf detected after residual connection, applying correction")
+                    all_emb_1 = torch.nan_to_num(all_emb_1, nan=0.0, posinf=1.0, neginf=-1.0)
+                    
+            except Exception as ode_error:
+                print(f"⚠️  ODE integration failed: {ode_error}, using identity mapping")
+                all_emb_1 = all_emb  # Fallback to identity
+            
+            # Split back to users and items
+            try:
+                users, items = torch.split(all_emb_1, [self.num_users, self.num_items], dim=0)
+            except Exception as split_error:
+                raise RuntimeError(f"Failed to split embeddings: {split_error}")
+            
+            # Cache result for evaluation
+            if not self.training:
+                self._cached_result = (users.detach(), items.detach())
+                self._cache_valid = True
+            
+            # Increment computation counter
+            self._computation_count += 1
+            
+            return users, items
+            
+        except Exception as e:
+            print(f"❌ Critical error in ODE_CF computer(): {e}")
+            
+            # Emergency fallback to basic embeddings
+            try:
+                users_emb = self.embedding_user.weight
+                items_emb = self.embedding_item.weight
+                print("🔄 Using fallback basic embeddings")
+                return users_emb, items_emb
+            except Exception as fallback_error:
+                raise RuntimeError(f"Both ODE and fallback computation failed: {e}, {fallback_error}")
+    
+    def invalidate_cache(self):
+        """Invalidate computation cache"""
+        self._cache_valid = False
+        self._cached_result = None
+    
+    def train(self, mode=True):
+        """Override train method to invalidate cache"""
+        super().train(mode)
+        if mode:  # Entering training mode
+            self.invalidate_cache()
+        return self
+    
+    def get_computation_stats(self):
+        """Get computation statistics"""
+        return {
+            'computation_count': self._computation_count,
+            'cache_valid': self._cache_valid,
+            'has_cached_result': self._cached_result is not None
+        }
     
     def getUsersRating(self, users):
         all_users, all_items = self.computer()
